@@ -59,7 +59,9 @@ fleet_sync() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|gh) echo "brew install $1  # or the platform's package manager" ;;
+    node|gh) echo "brew install $1  # or the platform's package manager" ;;
+    tmux) echo "brew install tmux  # or the platform's package manager" ;;
+    wezterm) echo "winget install wez.wezterm  # or https://wezfurlong.org/wezterm/install/windows.html" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -67,7 +69,13 @@ install_cmd() {
   esac
 }
 
-TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi"
+# A terminal multiplexer is required to run the crew in watchable windows.
+# tmux on macOS/Linux; WezTerm's multiplexer CLI on Windows (no tmux port).
+mux_present() {
+  command -v tmux >/dev/null 2>&1 || command -v "${FM_WEZTERM:-wezterm}" >/dev/null 2>&1
+}
+
+TOOLS="node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi"
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -90,6 +98,15 @@ for t in $TOOLS; do
 done
 if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
+fi
+if ! mux_present; then
+  # Emit a token install_cmd / `fm-bootstrap.sh install <token>` understands,
+  # chosen per platform: wezterm on Windows (no tmux port), tmux elsewhere.
+  case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*) mux_tool=wezterm ;;
+    *) mux_tool=tmux ;;
+  esac
+  echo "MISSING: $mux_tool (install: $(install_cmd "$mux_tool"))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 crew=

@@ -5,7 +5,7 @@
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
-#   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
+#   opencode|pi|copilot) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
@@ -82,7 +82,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi)
+    ''|claude|codex|opencode|pi|copilot)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -125,6 +125,7 @@ launch_template() {
         printf '%s' 'pi -e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
+    copilot) printf '%s' 'copilot --allow-all -i "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -303,31 +304,70 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-# Same session when firstmate already runs inside tmux; dedicated session otherwise.
-if [ -n "${TMUX:-}" ]; then
-  SES=$(tmux display-message -p '#S')
-else
-  tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
-  SES=firstmate
-fi
+# Source the multiplexer abstraction (tmux on macOS/Linux, wezterm on Windows).
+. "$FM_ROOT/bin/fm-mux.sh"
+
+# Same session when firstmate already runs inside the multiplexer; a dedicated
+# session otherwise (tmux). wezterm has no separate session object - new tabs
+# land in the active window - so fm_mux_session returns a sentinel there.
+SES=$(fm_mux_session)
 
 W="fm-$ID"
-T="$SES:$W"
-if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
-  echo "error: window $T already exists" >&2
+if fm_mux_window_exists "$SES" "$W"; then
+  echo "error: window $SES:$W already exists" >&2
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
-if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
+# Duplicate-spawn guard for backends that cannot query a window by name (wezterm:
+# fm_mux_window_exists is a structural no-op there). For a non-secondmate task,
+# if this id already has a meta whose recorded window is still alive, refuse
+# rather than create a second tab and overwrite the meta - which would orphan the
+# prior tab+worktree and drop it out of teardown tracking. Secondmate respawn is a
+# deliberate recovery path (it reads home= from the existing meta above), so it is
+# exempt. This complements the fm_mux_window_exists check, which covers tmux.
+if [ "$KIND" != secondmate ] && [ -f "$STATE/$ID.meta" ]; then
+  prev_window=$(grep '^window=' "$STATE/$ID.meta" | cut -d= -f2- || true)
+  if [ -n "$prev_window" ] && fm_mux_pane_alive "$prev_window" 2>/dev/null; then
+    echo "error: task $ID already in flight (window $prev_window); tear it down first" >&2
+    exit 1
+  fi
+fi
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
-    p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
+T=$(fm_mux_new_window "$SES" "$W" "$PROJ_ABS") || { echo "error: failed to create window $W in $SES" >&2; exit 1; }
+if [ "$KIND" != secondmate ]; then
+  fm_mux_send_text "$T" 'treehouse get'
+  fm_mux_send_enter "$T"
+
+  # Detect the treehouse worktree the subshell entered.
+  # Primary signal: the pane's reported cwd moves off the project dir (fast).
+  # On the wezterm backend this depends on the shell emitting OSC 7, which Git
+  # Bash may not do, so once the subshell is up we ALSO print its $PWD into the
+  # pane behind a unique marker and read it back from the pane text - a fallback
+  # that needs no OSC 7. The fallback is wezterm-only so the verified tmux path
+  # (native cwd tracking) stays byte-identical. Whichever resolves first to a
+  # path different from the project dir wins.
+  BACKEND=$(fm_mux_backend)
+  WT_PROBE="__FM_WT_${ID}__"
+  WT_GRACE=${FM_WORKTREE_PROBE_GRACE:-8}
+  for i in $(seq 1 60); do
+    p=$(fm_mux_pane_path "$T" 2>/dev/null || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
       break
+    fi
+    if [ "$BACKEND" = wezterm ] && [ "$i" -ge "$WT_GRACE" ]; then
+      # Re-emit periodically: a probe sent before treehouse finished setting up
+      # runs in the project shell (path == project dir, ignored below); once the
+      # worktree subshell is active a probe prints the worktree path.
+      if [ $(( i % 3 )) -eq 0 ]; then
+        fm_mux_send_text "$T" "printf '%s%s\\n' '$WT_PROBE=' \"\$PWD\""
+        fm_mux_send_enter "$T"
+      fi
+      cand=$(fm_mux_capture "$T" 80 2>/dev/null | sed -n "s/^$WT_PROBE=//p" | tail -1 || true)
+      if [ -n "$cand" ] && [ "$cand" != "$PROJ_ABS" ]; then
+        WT="$cand"
+        break
+      fi
     fi
     sleep 1
   done
@@ -386,6 +426,18 @@ EOF
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
       ;;
+    copilot*)
+      # copilot reads repo-level hooks from .github/copilot/settings.local.json (merged
+      # with any committed .github/copilot/settings.json). The "agentStop" event fires
+      # each time the agent finishes responding - the per-turn boundary the watcher needs.
+      # Use the hook's "bash" field (not "command", whose default shell is cmd/powershell
+      # on Windows) so `touch` resolves under Git Bash. Git-excluded like the others.
+      mkdir -p "$WT/.github/copilot"
+      cat > "$WT/.github/copilot/settings.local.json" <<EOF
+{"hooks":{"agentStop":[{"type":"command","bash":"touch '$TURNEND'"}]}}
+EOF
+      exclude_path '.github/copilot/settings.local.json'
+      ;;
   esac
 fi
 
@@ -430,8 +482,8 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-tmux send-keys -t "$T" -l "$LAUNCH"
+fm_mux_send_text "$T" "$LAUNCH"
 sleep 0.3
-tmux send-keys -t "$T" Enter
+fm_mux_send_enter "$T"
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

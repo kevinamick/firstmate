@@ -88,6 +88,8 @@ set -u
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# shellcheck source=bin/fm-mux.sh
+. "$FM_DAEMON_DIR/fm-mux.sh"
 
 # --- tunables ---------------------------------------------------------------
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
@@ -97,8 +99,9 @@ ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
 # Busy signatures per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working...".
-BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; copilot: "Working ...
+# esc cancel" ("esc cancel"/"esc to stop"; not the dialog footer "esc to cancel").
+BUSY_REGEX_DEFAULT='esc (to )?interrupt|esc cancel|esc to stop|Working\.\.\.'
 CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 # Patterns that indicate an EMPTY composer (idle pane, no pending input). Used by
 # pane_input_pending to distinguish "bare prompt, nothing typed" from "human
@@ -106,7 +109,7 @@ CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green
 # the composer is empty (safe to inject); a non-match with non-whitespace content
 # means there is pending input (defer). Err on the side of treating unrecognized
 # content as pending (false positives are cheap — just a deferred cycle).
-COMPOSER_IDLE_RE_DEFAULT='^[[:space:]]*(\$|>|❯|%|#)[[:space:]]*$|esc (to )?interrupt|Working\.\.\.'
+COMPOSER_IDLE_RE_DEFAULT='^[[:space:]]*(\$|>|❯|%|#)[[:space:]]*$|esc (to )?interrupt|esc cancel|esc to stop|Working\.\.\.'
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
@@ -218,10 +221,11 @@ _collapse_newlines() {  # <text>
 
 # Auto-discover the supervisor pane at startup. Priority:
 #   1. FM_SUPERVISOR_TARGET env (explicit override) — caller passes it in.
-#   2. $TMUX_PANE — tmux sets this in every pane's environment; inherited by
-#      the daemon when the /afk skill launches it from firstmate's own pane.
-#   3. firstmate:0 — legacy fallback (may not resolve if the session is named
-#      differently). The caller logs a warning in that case.
+#   2. $TMUX_PANE / $WEZTERM_PANE — the multiplexer sets one of these in every
+#      pane's environment; inherited by the daemon when /afk launches it from
+#      firstmate's own pane. WEZTERM_PANE becomes a wezterm:<id> handle.
+#   3. firstmate:0 — legacy tmux fallback (may not resolve if the session is
+#      named differently). The caller logs a warning in that case.
 # Returns the resolved target on stdout; returns 1 if only the fallback is left
 # AND the fallback does not resolve to a live pane.
 discover_supervisor_target() {
@@ -231,6 +235,10 @@ discover_supervisor_target() {
   fi
   if [ -n "${TMUX_PANE:-}" ]; then
     printf '%s' "$TMUX_PANE"
+    return 0
+  fi
+  if [ -n "${WEZTERM_PANE:-}" ]; then
+    printf 'wezterm:%s' "$WEZTERM_PANE"
     return 0
   fi
   printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"
@@ -387,7 +395,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # 0 if the pane is currently showing a busy signature (crewmate resumed/working).
 pane_is_busy() {  # <window>
   local win=$1 tail40
-  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
+  tail40=$(fm_mux_capture "$win" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
     | grep -qiE "${FM_BUSY_REGEX:-$BUSY_REGEX_DEFAULT}"
 }
@@ -405,10 +413,10 @@ pane_is_busy() {  # <window>
 pane_input_pending() {  # <target>
   local target=$1 cy pane_out line
   # Get the cursor's Y position (0-indexed from the top of the visible pane).
-  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
+  cy=$(fm_mux_cursor_y "$target" 2>/dev/null) || return 1
   case "$cy" in ''|*[!0-9]*) return 1 ;; esac
   # Capture the full visible pane and extract the cursor line (sed is 1-indexed).
-  pane_out=$(tmux capture-pane -p -t "$target" 2>/dev/null) || return 1
+  pane_out=$(fm_mux_capture_visible "$target" 2>/dev/null) || return 1
   line=$(printf '%s\n' "$pane_out" | sed -n "$((cy + 1))p")
   # Strip trailing whitespace (the cursor position is not "content").
   line="${line%"${line##*[![:space:]]}"}"
@@ -518,9 +526,26 @@ housekeeping() {  # <state>
 # Find a live fm-* window whose task id matches the given marker key.
 window_for_task() {  # <task-key>
   local key=$1 w t
-  for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
-    t=$(window_to_task "$w")
-    [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
+  if [ "$(fm_mux_backend)" = tmux ]; then
+    for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
+      t=$(window_to_task "$w")
+      [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
+    done
+    return 1
+  fi
+  # Non-tmux (wezterm): the multiplexer cannot be queried by window name, so map
+  # the stale key back through this home's task meta, which records the handle.
+  local meta task st
+  st=$(_state_root)
+  for meta in "$st"/*.meta; do
+    [ -e "$meta" ] || continue
+    task=$(basename "$meta" .meta)
+    [ "$(_stale_key "$task")" = "$key" ] || continue
+    w=$(grep '^window=' "$meta" | cut -d= -f2- || true)
+    [ -n "$w" ] || continue
+    fm_mux_pane_alive "$w" 2>/dev/null || return 1
+    printf '%s' "$w"
+    return 0
   done
   return 1
 }
@@ -556,7 +581,7 @@ inject_msg() {  # <message> [state]
   msg=$(_collapse_newlines "$msg")
   msg="${FM_INJECT_MARK}${msg}"
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 || return 1
+  fm_mux_pane_alive "$target" 2>/dev/null || return 1
   # (3) Busy-guard: never inject into an in-use pane. Two checks:
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
   #   b) pane_input_pending: the cursor line has non-empty content (a human's
@@ -576,7 +601,7 @@ inject_msg() {  # <message> [state]
   # consumed); submit failure = the composer still has our text (Enter swallowed).
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  if ! tmux send-keys -t "$target" -l "$msg" 2>/dev/null; then
+  if ! fm_mux_send_text "$target" "$msg" 2>/dev/null; then
     log "inject failed: send-keys -l returned non-zero"
     return 1
   fi
@@ -584,7 +609,7 @@ inject_msg() {  # <message> [state]
   i=0
   while [ "$i" -lt "$retries" ]; do
     i=$((i + 1))
-    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    fm_mux_send_enter "$target" 2>/dev/null || true
     sleep "$sleep_s"
     if ! pane_input_pending "$target"; then
       return 0  # Composer cleared → submit succeeded.
@@ -735,8 +760,8 @@ fm_super_main() {
   local TARGET="$FM_SUPERVISOR_TARGET"
 
   # --- validate supervisor target at startup (a missing target is a typo) ---
-  if ! tmux display-message -p -t "$TARGET" '#{pane_id}' >/dev/null 2>&1; then
-    echo "error: supervisor target '$TARGET' does not resolve to a tmux pane; set FM_SUPERVISOR_TARGET" >&2
+  if ! fm_mux_pane_alive "$TARGET" 2>/dev/null; then
+    echo "error: supervisor target '$TARGET' does not resolve to a live pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found"
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
@@ -801,7 +826,7 @@ fm_super_main() {
     # has nowhere to go, and firstmate itself is the consumer of escalations.
     # Catch-up signals persist in state/*.status and flow on the next run, so
     # this delays rather than loses work.
-    if ! tmux display-message -p -t "$TARGET" '#{pane_id}' >/dev/null 2>&1; then
+    if ! fm_mux_pane_alive "$TARGET" 2>/dev/null; then
       log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
       # Flush is pointless with no pane; preserve any buffered escalations.
       sleep "$INJECT_FAIL_SLEEP"

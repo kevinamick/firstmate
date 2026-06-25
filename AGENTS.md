@@ -67,7 +67,7 @@ README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
-bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning; read each script's header before first use
+bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning, fm-mux.sh for the terminal-multiplexer abstraction (tmux on macOS/Linux, wezterm on Windows), and fm-proc.sh for portable process/ancestry introspection (incl. Git Bash/MSYS where `ps -o` is unavailable); read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -126,6 +126,12 @@ Do not memorize their flags; their session hooks and `--help` are the source of 
 If the captain names a different crewmate harness at bootstrap or later, write it to `config/crew-harness` (local, gitignored); that is the whole switch.
 
 ## 4. Harness adapters
+
+The crew lives in terminal-multiplexer windows.
+All multiplexer interaction (create window, send keys, capture pane, read cwd, kill) goes through `bin/fm-mux.sh`, which has two backends: `tmux` on macOS/Linux and `wezterm` on Windows (tmux has no Windows port, so firstmate drives WezTerm's CLI and crewmates appear as WezTerm tabs).
+The backend auto-selects (prefer `$TMUX`, then a tmux binary, then WezTerm); `FM_MUX` forces it.
+Never call `tmux` directly from a script; call the `fm_mux_*` verbs so both platforms work.
+Window handles are opaque: `session:window` for tmux, `wezterm:<pane_id>` for wezterm, stored verbatim in `state/<id>.meta`.
 
 Crewmates default to the same harness you are running on.
 The captain may override this at any time, typically at bootstrap: record the choice in `config/crew-harness` (a single word - an adapter name below; the file is local and gitignored, so each machine keeps its own; absent or `default` means mirror your own harness).
@@ -194,6 +200,21 @@ Project trust dialog can appear on the first pi run in any not-yet-trusted direc
 fm-spawn keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse (and pollute the project).
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Environment marker for harness detection: pi sets `PI_CODING_AGENT=true` for its children.
+
+### copilot (VERIFIED 2026-06-25, GitHub Copilot CLI 1.0.65)
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `Working` + `esc cancel` (footer `<spinner> Working   esc cancel`; long tool runs may show `esc to stop`). The trust-dialog footer says `esc to cancel` (with "to") and is deliberately NOT a busy match, so a wedged dialog still wakes the watcher. |
+| Exit command | `/exit` |
+| Interrupt | single Escape |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`); natural language also triggers a skill by its description |
+
+Launch: `copilot --allow-all -i "$(cat <brief>)"` - `-i <prompt>` starts the interactive TUI and auto-runs the brief (so the pane stays supervisable), while `--allow-all` is full autonomy (tools, paths, urls), the analog of claude's `--dangerously-skip-permissions`.
+Folder-trust dialog on first run in any not-yet-trusted folder ("Do you trust the files in this folder?", default `1. Yes`) - accept with Enter; trust is remembered per folder only with option 2, and every treehouse worktree is a new path, so expect it on each spawn. Peek within ~20s and accept if showing.
+Turn-end signal: fm-spawn writes `.github/copilot/settings.local.json` with an `agentStop` hook (merged with any committed `.github/copilot/settings.json`). `agentStop` fires each time the agent finishes responding - the per-turn boundary the watcher needs. The hook uses the `bash` field (not `command`, whose default shell is cmd/powershell on Windows) so `touch` resolves under Git Bash; it is git-excluded like the other harnesses' hooks.
+Startup is slow (~60s: it loads instructions, hooks, skills, MCP servers, plugins, and agents) - the animated spinner keeps the pane changing, so the load is not mistaken for a stale pane; don't expect readiness immediately after spawn.
+Environment marker for harness detection: copilot sets `COPILOT_CLI=1` for its children.
 
 ## 5. Recovery (run at every session start, after bootstrap)
 
@@ -541,7 +562,7 @@ With afk active:
 
 **In-band sentinel marker (the load-bearing detail).** The daemon injects into the same pane the captain types into, so an escalation would otherwise look like a user message and cancel afk the moment it fired.
 Every daemon injection is prefixed with `FM_INJECT_MARK` (ASCII unit separator, 0x1f) — a byte a human would never type at the start of a message.
-The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection (not portable across claude, codex, opencode, pi).
+The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection (not portable across claude, codex, opencode, pi, copilot).
 
 **Exiting afk (the captain's contract).** When firstmate receives a message while afk is active:
 - Leading marker present → **internal escalation**. Stay afk, process it.

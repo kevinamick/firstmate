@@ -18,6 +18,8 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-mux.sh
+. "$SCRIPT_DIR/fm-mux.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
@@ -66,8 +68,10 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
-# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working..."
-BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.'}
+# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
+# copilot: "Working ... esc cancel" ("esc cancel"/"esc to stop"; the trust-dialog
+# footer "esc to cancel" is deliberately NOT matched so a wedged dialog still wakes).
+BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|esc cancel|esc to stop|Working\.\.\.'}
 
 hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
@@ -221,7 +225,7 @@ EOF
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_kind "$w")" = secondmate ] && continue
-    tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
+    tail40=$(fm_mux_capture "$w" 40 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
