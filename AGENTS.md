@@ -201,6 +201,21 @@ fm-spawn keeps the turn-end extension in `state/`, outside the worktree, because
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Environment marker for harness detection: pi sets `PI_CODING_AGENT=true` for its children.
 
+### copilot (VERIFIED 2026-06-25, GitHub Copilot CLI 1.0.65)
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `Working` + `esc cancel` (footer `<spinner> Working   esc cancel`; long tool runs may show `esc to stop`). The trust-dialog footer says `esc to cancel` (with "to") and is deliberately NOT a busy match, so a wedged dialog still wakes the watcher. |
+| Exit command | `/exit` |
+| Interrupt | single Escape |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`); natural language also triggers a skill by its description |
+
+Launch: `copilot --allow-all -i "$(cat <brief>)"` - `-i <prompt>` starts the interactive TUI and auto-runs the brief (so the pane stays supervisable), while `--allow-all` is full autonomy (tools, paths, urls), the analog of claude's `--dangerously-skip-permissions`.
+Folder-trust dialog on first run in any not-yet-trusted folder ("Do you trust the files in this folder?", default `1. Yes`) - accept with Enter; trust is remembered per folder only with option 2, and every treehouse worktree is a new path, so expect it on each spawn. Peek within ~20s and accept if showing.
+Turn-end signal: fm-spawn writes `.github/copilot/settings.local.json` with an `agentStop` hook (merged with any committed `.github/copilot/settings.json`). `agentStop` fires each time the agent finishes responding - the per-turn boundary the watcher needs. The hook uses the `bash` field (not `command`, whose default shell is cmd/powershell on Windows) so `touch` resolves under Git Bash; it is git-excluded like the other harnesses' hooks.
+Startup is slow (~60s: it loads instructions, hooks, skills, MCP servers, plugins, and agents) - the animated spinner keeps the pane changing, so the load is not mistaken for a stale pane; don't expect readiness immediately after spawn.
+Environment marker for harness detection: copilot sets `COPILOT_CLI=1` for its children.
+
 ## 5. Recovery (run at every session start, after bootstrap)
 
 You may have been restarted mid-flight.
@@ -547,7 +562,7 @@ With afk active:
 
 **In-band sentinel marker (the load-bearing detail).** The daemon injects into the same pane the captain types into, so an escalation would otherwise look like a user message and cancel afk the moment it fired.
 Every daemon injection is prefixed with `FM_INJECT_MARK` (ASCII unit separator, 0x1f) — a byte a human would never type at the start of a message.
-The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection (not portable across claude, codex, opencode, pi).
+The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection (not portable across claude, codex, opencode, pi, copilot).
 
 **Exiting afk (the captain's contract).** When firstmate receives a message while afk is active:
 - Leading marker present → **internal escalation**. Stay afk, process it.

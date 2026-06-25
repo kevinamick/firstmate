@@ -69,7 +69,7 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 **Prerequisites** (the first mate detects everything else and offers to install it):
 
 ```sh
-# 1. a verified agent harness - claude, codex, opencode, or pi
+# 1. a verified agent harness - claude, codex, opencode, pi, or copilot
 # 2. git + GitHub auth
 # 3. a terminal multiplexer - tmux on macOS/Linux, or WezTerm on Windows
 #    (tmux has no Windows port; firstmate drives WezTerm's CLI there instead).
@@ -188,7 +188,7 @@ After creating a secondmate, move existing main-backlog items that you have judg
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
-Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
+Harness support is a table in section 4: claude, codex, opencode, pi, and copilot are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
 
 On Windows, firstmate runs under Git Bash and drives the crew through WezTerm's multiplexer CLI instead of tmux (which has no Windows port); `bin/fm-mux.sh` auto-selects the backend, and `FM_MUX` forces it (`tmux` or `wezterm`).
 

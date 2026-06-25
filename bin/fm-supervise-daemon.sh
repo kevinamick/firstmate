@@ -99,8 +99,9 @@ ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
 # Busy signatures per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working...".
-BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; copilot: "Working ...
+# esc cancel" ("esc cancel"/"esc to stop"; not the dialog footer "esc to cancel").
+BUSY_REGEX_DEFAULT='esc (to )?interrupt|esc cancel|esc to stop|Working\.\.\.'
 CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 # Patterns that indicate an EMPTY composer (idle pane, no pending input). Used by
 # pane_input_pending to distinguish "bare prompt, nothing typed" from "human
@@ -108,7 +109,7 @@ CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green
 # the composer is empty (safe to inject); a non-match with non-whitespace content
 # means there is pending input (defer). Err on the side of treating unrecognized
 # content as pending (false positives are cheap — just a deferred cycle).
-COMPOSER_IDLE_RE_DEFAULT='^[[:space:]]*(\$|>|❯|%|#)[[:space:]]*$|esc (to )?interrupt|Working\.\.\.'
+COMPOSER_IDLE_RE_DEFAULT='^[[:space:]]*(\$|>|❯|%|#)[[:space:]]*$|esc (to )?interrupt|esc cancel|esc to stop|Working\.\.\.'
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5

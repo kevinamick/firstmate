@@ -5,7 +5,7 @@
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
-#   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
+#   opencode|pi|copilot) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
@@ -82,7 +82,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi)
+    ''|claude|codex|opencode|pi|copilot)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -125,6 +125,7 @@ launch_template() {
         printf '%s' 'pi -e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
+    copilot) printf '%s' 'copilot --allow-all -i "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -424,6 +425,18 @@ EOF
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      ;;
+    copilot*)
+      # copilot reads repo-level hooks from .github/copilot/settings.local.json (merged
+      # with any committed .github/copilot/settings.json). The "agentStop" event fires
+      # each time the agent finishes responding - the per-turn boundary the watcher needs.
+      # Use the hook's "bash" field (not "command", whose default shell is cmd/powershell
+      # on Windows) so `touch` resolves under Git Bash. Git-excluded like the others.
+      mkdir -p "$WT/.github/copilot"
+      cat > "$WT/.github/copilot/settings.local.json" <<EOF
+{"hooks":{"agentStop":[{"type":"command","bash":"touch '$TURNEND'"}]}}
+EOF
+      exclude_path '.github/copilot/settings.local.json'
       ;;
   esac
 fi
