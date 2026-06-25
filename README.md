@@ -207,7 +207,7 @@ FM_GUARD_GRACE=300      # seconds a stale watcher beacon may age before guard wa
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
-FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, extend per harness
+FM_BUSY_REGEX='esc (to )?interrupt|esc cancel|esc to stop|Working\.\.\.'   # busy-pane signatures, extend per harness
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor pane (tmux target, or wezterm:<pane_id>); auto-discovers from $TMUX_PANE / $WEZTERM_PANE
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
