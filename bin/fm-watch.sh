@@ -6,8 +6,9 @@
 #   stale: <window>       a crewmate pane stopped changing and shows no busy signature
 #   check: <script>: <out> a per-task check script (e.g. merged-PR poll) produced output
 #   heartbeat              fleet review due; starts at FM_HEARTBEAT and backs off to FM_HEARTBEAT_MAX
-# Run as a background task. Re-arm it after handling each wake; duplicate
-# invocations no-op through the watcher singleton lock.
+# For normal supervision, re-arm after each wake by running bin/fm-watch-arm.sh
+# through the harness's tracked background mechanism. Direct duplicate
+# invocations of this script still no-op through the watcher singleton lock.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,8 +19,11 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-mux.sh
+. "$SCRIPT_DIR/fm-mux.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
+WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
@@ -41,6 +45,13 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 trap 'fm_lock_release "$WATCH_LOCK"' EXIT
+# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
+# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
+# substitution, so it matches the stored holder pid for the self-eviction check.
+WATCHER_PID=${BASHPID:-$$}
+printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
+printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
+fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 # Portable stat. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU) stat uses `-c <fmt>`.
 # Do NOT use the `stat -f <fmt> ... || stat -c <fmt> ...` fallback form: on Linux
@@ -157,6 +168,16 @@ run_check() {
 }
 
 while :; do
+  # Self-eviction: if the singleton lock no longer names this process, a second
+  # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
+  # down so the rightful singleton continues alone. The EXIT trap's release
+  # no-ops because the lock pid is not ours, so the survivor's lock is untouched.
+  # This makes any duplicate self-resolve within one poll instead of persisting
+  # and doubling every wake.
+  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
+    exit 0
+  fi
+
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
@@ -221,7 +242,7 @@ EOF
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_kind "$w")" = secondmate ] && continue
-    tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
+    tail40=$(fm_mux_capture "$w" 40 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
